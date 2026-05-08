@@ -1,15 +1,14 @@
 "use client"
 
 import { Download, Loader2, RotateCcw } from "lucide-react"
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { ATSScorePanel } from "@/components/ATSScorePanel"
+import { ChatPanel, type ChatMessage } from "@/components/ChatPanel"
 import { FileUpload } from "@/components/FileUpload"
 import { JDInput } from "@/components/JDInput"
-import { ResumePreview } from "@/components/ResumePreview"
+import { PdfPreview, type PdfPreviewHandle } from "@/components/PdfPreview"
 import { SectionEditor } from "@/components/SectionEditor"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Label } from "@/components/ui/label"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import type { Resume } from "@/lib/resumeSchema"
 
@@ -18,32 +17,23 @@ type Screen = "input" | "generating" | "preview"
 const STATUS_MESSAGES = [
   "Reading your resume…",
   "Analysing job description…",
-  "Selecting relevant skill files…",
   "Building your resume…",
   "Calculating ATS score…",
 ]
 
-interface Props {
-  skillFiles: string[]
-}
-
-export function ResumeBuilderClient({ skillFiles }: Props) {
+export function ResumeBuilderClient() {
   const [screen, setScreen] = useState<Screen>("input")
   const [jd, setJd] = useState("")
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
-  const [selectedSkills, setSelectedSkills] = useState<string[]>(skillFiles)
   const [length, setLength] = useState<"concise" | "standard">("standard")
   const [tone, setTone] = useState<"technical" | "executive">("technical")
   const [resume, setResume] = useState<Resume | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [statusIndex, setStatusIndex] = useState(0)
   const [isExporting, setIsExporting] = useState(false)
-
-  function toggleSkill(name: string) {
-    setSelectedSkills((prev) =>
-      prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name]
-    )
-  }
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
+  const [isRefining, setIsRefining] = useState(false)
+  const pdfPreviewRef = useRef<PdfPreviewHandle>(null)
 
   async function handleGenerate() {
     if (jd.trim().length < 300) {
@@ -54,7 +44,6 @@ export function ResumeBuilderClient({ skillFiles }: Props) {
     setStatusIndex(0)
     setScreen("generating")
 
-    // Cycle through status messages while waiting
     const interval = setInterval(() => {
       setStatusIndex((i) => (i + 1) % STATUS_MESSAGES.length)
     }, 3000)
@@ -64,7 +53,6 @@ export function ResumeBuilderClient({ skillFiles }: Props) {
       formData.set("jobDescription", jd)
       formData.set("length", length)
       formData.set("tone", tone)
-      selectedSkills.forEach((s) => formData.append("skills", s))
       uploadedFiles.forEach((f) => formData.append("files", f))
 
       const res = await fetch("/api/generate", { method: "POST", body: formData })
@@ -73,12 +61,43 @@ export function ResumeBuilderClient({ skillFiles }: Props) {
       if (!res.ok) throw new Error(data.error || "Generation failed.")
 
       setResume(data.resume)
+      setChatHistory([])
       setScreen("preview")
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.")
       setScreen("input")
     } finally {
       clearInterval(interval)
+    }
+  }
+
+  async function handleRefine(message: string) {
+    if (!resume) return
+    const userMsg: ChatMessage = { role: "user", content: message }
+    const updatedHistory = [...chatHistory, userMsg]
+    setChatHistory(updatedHistory)
+    setIsRefining(true)
+    try {
+      const res = await fetch("/api/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resume, messages: updatedHistory, jd }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "Refinement failed.")
+      setResume(data.resume)
+      setChatHistory((h) => [...h, { role: "assistant", content: data.summary }])
+      pdfPreviewRef.current?.compile()
+    } catch (err) {
+      setChatHistory((h) => [
+        ...h,
+        {
+          role: "assistant",
+          content: `Error: ${err instanceof Error ? err.message : "Refinement failed."}`,
+        },
+      ])
+    } finally {
+      setIsRefining(false)
     }
   }
 
@@ -124,8 +143,8 @@ export function ResumeBuilderClient({ skillFiles }: Props) {
   // ── Preview + Edit screen ──────────────────────────────────
   if (screen === "preview" && resume) {
     return (
-      <div className="min-h-svh bg-muted/40 pb-24">
-        {/* Sticky bottom bar */}
+      <div className="flex h-svh flex-col overflow-hidden bg-muted/40">
+        {/* Bottom bar */}
         <div className="fixed bottom-0 left-0 right-0 z-10 flex items-center gap-3 border-t border-border bg-background px-6 py-3">
           {error && <p className="text-xs text-destructive">{error}</p>}
           <div className="ml-auto flex gap-2">
@@ -135,6 +154,7 @@ export function ResumeBuilderClient({ skillFiles }: Props) {
               onClick={() => {
                 setResume(null)
                 setError(null)
+                setChatHistory([])
                 setScreen("input")
               }}
             >
@@ -152,16 +172,30 @@ export function ResumeBuilderClient({ skillFiles }: Props) {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-6 p-6 xl:grid-cols-[1fr_360px]">
-          {/* Left: Preview + editor */}
-          <div className="space-y-6">
-            <ResumePreview resume={resume} />
-            <SectionEditor resume={resume} onChange={setResume} />
-          </div>
+        {/* Main area — fills viewport, leaves room for bottom bar */}
+        <div className="min-h-0 flex-1 overflow-hidden px-6 pb-[72px] pt-6">
+          <div className="grid h-full grid-cols-1 gap-6 xl:grid-cols-[320px_1fr_300px]">
+            {/* Left: editor */}
+            <div className="min-h-0 overflow-y-auto">
+              <SectionEditor resume={resume} onChange={setResume} />
+            </div>
 
-          {/* Right: ATS panel */}
-          <div className="xl:sticky xl:top-6 xl:self-start">
-            <ATSScorePanel atsScore={resume.atsScore} />
+            {/* Center: PDF preview */}
+            <div className="min-h-0 overflow-y-auto">
+              <PdfPreview ref={pdfPreviewRef} resume={resume} />
+            </div>
+
+            {/* Right: ATS panel + chat */}
+            <div className="min-h-0 overflow-y-auto">
+              <ATSScorePanel atsScore={resume.atsScore} />
+              <div className="mt-4">
+                <ChatPanel
+                  messages={chatHistory}
+                  isLoading={isRefining}
+                  onSend={handleRefine}
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -180,27 +214,6 @@ export function ResumeBuilderClient({ skillFiles }: Props) {
 
       <JDInput value={jd} onChange={setJd} />
       <FileUpload files={uploadedFiles} onChange={setUploadedFiles} />
-
-      {/* Skill file checkboxes */}
-      {skillFiles.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs font-medium">Skill Context Files</p>
-          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-            {skillFiles.map((name) => (
-              <div key={name} className="flex items-center gap-2">
-                <Checkbox
-                  id={name}
-                  checked={selectedSkills.includes(name)}
-                  onCheckedChange={() => toggleSkill(name)}
-                />
-                <Label htmlFor={name} className="cursor-pointer text-xs">
-                  {name.replace(/\.md$/, "")}
-                </Label>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Generation options */}
       <div className="flex flex-wrap gap-4">

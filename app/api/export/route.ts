@@ -17,8 +17,7 @@ export async function POST(request: Request) {
 
     const resume = validation.data
 
-    // Dynamic import keeps @react-pdf/renderer out of the client bundle
-    const { generateResumePdf } = await import("@/lib/pdfTemplate")
+    const { generateResumePdf } = await import("@/lib/latexTemplate")
     const buffer = await generateResumePdf(resume)
 
     const safeName = resume.meta.name.replace(/[^a-zA-Z0-9\s]/g, "").trim().replace(/\s+/g, "_")

@@ -5,13 +5,10 @@ import path from "path"
 import { z } from "zod"
 import {
   listContextFiles,
-  listDirectory,
   readFileBuffer,
   readFileByExtension,
-  readTextFile,
   readTextFileSafe,
   resolveContextDir,
-  resolveSkillsDir,
 } from "@/lib/fileLoaders"
 import { ResumeSchema } from "@/lib/resumeSchema"
 
@@ -59,37 +56,26 @@ async function callGemini(
   messages: { role: "user" | "assistant"; content: string }[],
   uploadedContext: string
 ): Promise<{ text: string }> {
-  const skillsDir = resolveSkillsDir()
   const contextDir = resolveContextDir()
 
-  // Always inject the ATS reference guide — too important to leave to tool-call chance
-  const atsGuide = await readTextFileSafe(
-    path.join(contextDir, "skills", "ats.md")
-  )
-  const systemPrompt = atsGuide
-    ? `${SYSTEM_PROMPT}\n\n---\n\n# ATS Reference Guide (Always Apply)\n\n${atsGuide}`
-    : SYSTEM_PROMPT
+  // Always inject guides — too important to leave to tool-call chance
+  const [atsGuide, latexGuide] = await Promise.all([
+    readTextFileSafe(path.join(contextDir, "skills", "ats.md")),
+    readTextFileSafe(path.join(contextDir, "skills", "latex.md")),
+  ])
 
-  // Exclude the always-injected ATS file from listContextDocs to avoid double-reading
-  const ATS_GUIDE_PATH = "skills/ats.md"
+  const systemPrompt = [
+    SYSTEM_PROMPT,
+    atsGuide ? `---\n\n# ATS Reference Guide (Always Apply)\n\n${atsGuide}` : null,
+    latexGuide ? `---\n\n# LaTeX Resume Guide (Always Apply)\n\n${latexGuide}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+
+  // Exclude always-injected files from listContextDocs to avoid double-reading
+  const ALWAYS_INJECTED = new Set(["skills/ats.md", "skills/latex.md"])
 
   const tools = {
-    listSkillFiles: tool({
-      description: "List all available skill context files",
-      inputSchema: z.object({}),
-      execute: async (): Promise<string[]> => {
-        return listDirectory(skillsDir)
-      },
-    }),
-    readSkillFile: tool({
-      description: "Read a specific skill context file by name",
-      inputSchema: z.object({
-        name: z.string().describe("Filename from listSkillFiles"),
-      }),
-      execute: async ({ name }: { name: string }): Promise<string> => {
-        return readTextFile(path.join(skillsDir, name))
-      },
-    }),
     readBaseResume: tool({
       description:
         "Read the candidate's base resume to understand their full experience",
@@ -104,7 +90,7 @@ async function callGemini(
       inputSchema: z.object({}),
       execute: async (): Promise<string[]> => {
         return listContextFiles(contextDir).filter(
-          (f) => f !== "base-resume.pdf" && f !== ATS_GUIDE_PATH
+          (f) => f !== "base-resume.pdf" && !ALWAYS_INJECTED.has(f)
         )
       },
     }),
